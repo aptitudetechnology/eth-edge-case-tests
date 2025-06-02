@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HD Wallet Child Key Derivation</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/elliptic/6.5.4/elliptic.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+<link rel="stylesheet" href="/css/style.css">   
+</head>
+<body>
+    <div class="container">
+        <h1>HD Wallet Child Key Derivation</h1>
+        
+        <div class="warning">
+            <strong>Research Tool:</strong> This tool derives child keys from edge case master keys for cryptographic research purposes.
+        </div>
+
+        <div class="target-address">
+            <strong>Target Burn Address:</strong> <a href="https://etherscan.io/address/0x3f17f1962B36e491b30A40b2405849e597Ba5FB5">0x3f17f1962B36e491b30A40b2405849e597Ba5FB5</a>
+        </div>
+        
+        <div class="input-group">
+            <label for="masterKey">Master Private Key (hex):</label>
+            <input type="text" id="masterKey" value="fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141">
+            <div class="quick-buttons">
+                <button class="quick-btn" onclick="setMasterKey('0000000000000000000000000000000000000000000000000000000000000000')">All Zeros</button>
+                <button class="quick-btn" onclick="setMasterKey('fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141')">Secp256k1 n</button>
+                <button class="quick-btn" onclick="setMasterKey(generateRandomKey())">Random Key</button>
+            </div>
+        </div>
+        
+        <div class="input-group">
+            <label for="chainCode">Chain Code (64 hex characters):</label>
+            <input type="text" id="chainCode" placeholder="Leave empty for random generation">
+            <div class="quick-buttons">
+                <button class="quick-btn" onclick="setChainCode('0000000000000000000000000000000000000000000000000000000000000000')">All Zeros</button>
+                <button class="quick-btn" onclick="setChainCode('ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')">All FF</button>
+                <button class="quick-btn" onclick="setChainCode('0101010101010101010101010101010101010101010101010101010101010101')">Pattern 01</button>
+                <button class="quick-btn" onclick="setChainCode(generateRandomChainCode())">Random</button>
+                <button class="quick-btn" onclick="setChainCode(document.getElementById('masterKey').value)">Same as Master</button>
+            </div>
+        </div>
+        
+        <div class="input-group">
+            <label for="derivationPath">Derivation Path:</label>
+            <select id="derivationPath">
+                <option value="m/44'/60'/0'/0/0">m/44'/60'/0'/0/0 (Ethereum first account)</option>
+                <option value="m/44'/60'/0'/0/1">m/44'/60'/0'/0/1 (Ethereum second account)</option>
+                <option value="m/44'/714'/0'/0/0">m/44'/714'/0'/0/0 (BSC first account)</option>
+                <option value="m/0/0">m/0/0 (Simple derivation)</option>
+                <option value="m/0/1">m/0/1 (Simple derivation #2)</option>
+                <option value="m/1/0">m/1/0 (Simple derivation #3)</option>
+                <option value="custom">Custom path</option>
+            </select>
+        </div>
+        
+        <div class="input-group" id="customPathGroup" style="display:none;">
+            <label for="customPath">Custom Derivation Path:</label>
+            <input type="text" id="customPath" placeholder="e.g., m/44'/60'/0'/0/0">
+        </div>
+        
+        <button onclick="deriveChildKey()">Derive Child Key</button>
+        
+        <div class="batch-section">
+            <h3>Batch Testing</h3>
+            <div class="batch-controls">
+                <label>Iterations:</label>
+                <input type="number" id="batchCount" value="10" min="1" max="1000">
+                <button class="quick-btn" onclick="runBatchTest()">Run Batch Test</button>
+                <button class="quick-btn" onclick="stopBatch = true">Stop</button>
+            </div>
+            <div id="batchProgress"></div>
+        </div>
+        
+        <div id="results" class="results" style="display:none;"></div>
+    </div>
+
+    <script>
+        // Initialize elliptic curve
+        const EC = elliptic.ec;
+        const ec = new EC('secp256k1');
+        let stopBatch = false;
+        const targetAddress = '0x3f17f1962B36e491b30A40b2405849e597Ba5FB5';
+
+        document.getElementById('derivationPath').addEventListener('change', function() {
+            const customGroup = document.getElementById('customPathGroup');
+            if (this.value === 'custom') {
+                customGroup.style.display = 'block';
+            } else {
+                customGroup.style.display = 'none';
+            }
+        });
+
+        function setMasterKey(key) {
+            document.getElementById('masterKey').value = key;
+        }
+
+        function setChainCode(code) {
+            document.getElementById('chainCode').value = code;
+        }
+
+        function generateRandomKey() {
+            return CryptoJS.lib.WordArray.random(32).toString();
+        }
+
+        function generateRandomChainCode() {
+            return CryptoJS.lib.WordArray.random(32).toString();
+        }
+
+        function hmacSHA512(key, data) {
+            return CryptoJS.HmacSHA512(data, key);
+        }
+
+        function parseDerivationPath(path) {
+            if (!path.startsWith('m/')) {
+                throw new Error('Derivation path must start with m/');
+            }
+            
+            const parts = path.slice(2).split('/');
+            return parts.map(part => {
+                if (part.endsWith("'")) {
+                    return parseInt(part.slice(0, -1)) + 0x80000000;
+                }
+                return parseInt(part);
+            });
+        }
+
+        function deriveChildKey() {
+            try {
+                const masterKeyHex = document.getElementById('masterKey').value;
+                let chainCodeHex = document.getElementById('chainCode').value;
+                
+                // Generate random chain code if not provided
+                if (!chainCodeHex) {
+                    chainCodeHex = generateRandomChainCode();
+                }
+                
+                const derivationPathSelect = document.getElementById('derivationPath');
+                let derivationPath;
+                
+                if (derivationPathSelect.value === 'custom') {
+                    derivationPath = document.getElementById('customPath').value;
+                } else {
+                    derivationPath = derivationPathSelect.value;
+                }
+
+                // Parse derivation path
+                const indices = parseDerivationPath(derivationPath);
+                
+                // Convert hex strings to byte arrays
+                const masterKey = CryptoJS.enc.Hex.parse(masterKeyHex);
+                const chainCode = CryptoJS.enc.Hex.parse(chainCodeHex);
+                
+                let currentKey = masterKey;
+                let currentChainCode = chainCode;
+                
+                // Derive child keys step by step
+                for (let i = 0; i < indices.length; i++) {
+                    const index = indices[i];
+                    const isHardened = index >= 0x80000000;
+                    
+                    let data;
+                    if (isHardened) {
+                        // Hardened derivation: use private key
+                        data = CryptoJS.enc.Hex.parse('00' + currentKey.toString() + index.toString(16).padStart(8, '0'));
+                    } else {
+                        // Non-hardened derivation: use public key
+                        try {
+                            const keyPair = ec.keyFromPrivate(currentKey.toString());
+                            const publicKey = keyPair.getPublic().encode('hex', false);
+                            data = CryptoJS.enc.Hex.parse(publicKey + index.toString(16).padStart(8, '0'));
+                        } catch (e) {
+                            throw new Error('Cannot derive public key from invalid private key');
+                        }
+                    }
+                    
+                    // Compute HMAC-SHA512
+                    const hmac = hmacSHA512(currentChainCode, data);
+                    const hmacHex = hmac.toString();
+                    
+                    // Split into left and right halves
+                    const leftHalf = hmacHex.slice(0, 64);
+                    const rightHalf = hmacHex.slice(64);
+                    
+                    // New private key = (left half + current key) mod n
+                    const leftBN = BigInt('0x' + leftHalf);
+                    const currentKeyBN = BigInt('0x' + currentKey.toString());
+                    const n = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141');
+                    
+                    const newKeyBN = (leftBN + currentKeyBN) % n;
+                    
+                    if (newKeyBN === 0n) {
+                        throw new Error('Invalid child key derived (zero)');
+                    }
+                    
+                    currentKey = CryptoJS.enc.Hex.parse(newKeyBN.toString(16).padStart(64, '0'));
+                    currentChainCode = CryptoJS.enc.Hex.parse(rightHalf);
+                }
+                
+                // Generate final results
+                const finalPrivateKey = currentKey.toString();
+                
+                // Generate public key and address
+                const keyPair = ec.keyFromPrivate(finalPrivateKey);
+                const publicKey = keyPair.getPublic().encode('hex', false);
+                const publicKeyCompressed = keyPair.getPublic().encode('hex', true);
+                
+                // Generate Ethereum address
+                const publicKeyHash = CryptoJS.SHA3('0x' + publicKey.slice(2), { outputLength: 256 });
+                const address = '0x' + publicKeyHash.toString().slice(-40);
+                
+                displayResults({
+                    derivationPath: derivationPath,
+                    chainCode: chainCodeHex,
+                    privateKey: finalPrivateKey,
+                    publicKey: publicKey,
+                    publicKeyCompressed: publicKeyCompressed,
+                    address: address
+                });
+                
+                return address;
+                
+            } catch (error) {
+                displayError(error.message);
+                return null;
+            }
+        }
+
+        async function runBatchTest() {
+            const batchCount = parseInt(document.getElementById('batchCount').value);
+            const progressDiv = document.getElementById('batchProgress');
+            stopBatch = false;
+            
+            progressDiv.innerHTML = `<div>Starting batch test of ${batchCount} iterations...</div>`;
+            
+            let matches = 0;
+            let tested = 0;
+            
+            for (let i = 0; i < batchCount && !stopBatch; i++) {
+                // Generate random chain code for each iteration
+                setChainCode(generateRandomChainCode());
+                
+                const address = deriveChildKey();
+                tested++;
+                
+                if (address && address.toLowerCase() === targetAddress.toLowerCase()) {
+                    matches++;
+                    progressDiv.innerHTML += `<div style="color: red; font-weight: bold;">🎉 MATCH FOUND! Iteration ${i + 1}</div>`;
+                    break;
+                }
+                
+                if (i % 10 === 0 || i === batchCount - 1) {
+                    progressDiv.innerHTML = `<div>Tested: ${tested}/${batchCount} | Matches: ${matches} | Current: ${address || 'Error'}</div>`;
+                }
+                
+                // Small delay to prevent browser freezing
+                if (i % 100 === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 10));
+                }
+            }
+            
+            progressDiv.innerHTML += `<div><strong>Batch test complete!</strong> Tested: ${tested} | Matches: ${matches}</div>`;
+        }
+
+        function displayResults(results) {
+            const isMatch = results.address.toLowerCase() === targetAddress.toLowerCase();
+            const matchStyle = isMatch ? 'background: #d4edda; border-color: #c3e6cb; color: #155724;' : '';
+            
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = `
+                <h3>Derived Child Key Results ${isMatch ? '🎉 TARGET MATCH!' : ''}</h3>
+                <div class="result-item" style="${matchStyle}">
+                    <div class="result-label">Derivation Path:</div>
+                    <div class="result-value">${results.derivationPath}</div>
+                </div>
+                <div class="result-item" style="${matchStyle}">
+                    <div class="result-label">Chain Code Used:</div>
+                    <div class="result-value">${results.chainCode}</div>
+                </div>
+                <div class="result-item" style="${matchStyle}">
+                    <div class="result-label">Child Private Key:</div>
+                    <div class="result-value">${results.privateKey}</div>
+                </div>
+                <div class="result-item" style="${matchStyle}">
+                    <div class="result-label">Public Key (Uncompressed):</div>
+                    <div class="result-value">${results.publicKey}</div>
+                </div>
+                <div class="result-item" style="${matchStyle}">
+                    <div class="result-label">Public Key (Compressed):</div>
+                    <div class="result-value">${results.publicKeyCompressed}</div>
+                </div>
+                <div class="result-item" style="${matchStyle}">
+                    <div class="result-label">Ethereum Address:</div>
+                    <div class="result-value">${results.address}</div>
+                    <div style="margin-top: 10px;">
+                        <a href="https://etherscan.io/address/${results.address}" target="_blank" style="color: #007bff; text-decoration: none; font-weight: bold;">📊 View on Etherscan</a>
+                        &nbsp;&nbsp;|&nbsp;&nbsp;
+                        <a href="https://bscscan.com/address/${results.address}" target="_blank" style="color: #f0b90b; text-decoration: none; font-weight: bold;">🔗 View on BSCScan</a>
+                        &nbsp;&nbsp;|&nbsp;&nbsp;
+                        <button onclick="checkBalance('${results.address}')" style="background: #28a745; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; font-size: 12px;">💰 Check ETH Balance</button>
+                    </div>
+                </div>
+            `;
+            resultsDiv.style.display = 'block';
+        }
+
+        function displayError(message) {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = `
+                <div class="error">
+                    <strong>Error:</strong> ${message}
+                </div>
+            `;
+            resultsDiv.style.display = 'block';
+        }
+
+        async function checkBalance(address) {
+            try {
+                // Show loading state
+                const button = event.target;
+                const originalText = button.innerHTML;
+                button.innerHTML = '⏳ Checking...';
+                button.disabled = true;
+                
+                // Use a free Ethereum JSON-RPC endpoint
+                const response = await fetch('https://eth.llamarpc.com', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        jsonrpc: '2.0',
+                        method: 'eth_getBalance',
+                        params: [address, 'latest'],
+                        id: 1
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    throw new Error(data.error.message);
+                }
+                
+                // Convert from wei to ETH
+                const balanceWei = BigInt(data.result);
+                const balanceEth = Number(balanceWei) / 1e18;
+                
+                // Show result
+                button.innerHTML = `💰 ${balanceEth.toFixed(6)} ETH`;
+                button.style.background = balanceEth > 0 ? '#dc3545' : '#6c757d';
+                
+                // Add balance info to results
+                const addressDiv = button.closest('.result-item');
+                let balanceInfo = addressDiv.querySelector('.balance-info');
+                if (!balanceInfo) {
+                    balanceInfo = document.createElement('div');
+                    balanceInfo.className = 'balance-info';
+                    balanceInfo.style.cssText = 'margin-top: 10px; padding: 8px; border-radius: 3px; font-weight: bold;';
+                    addressDiv.appendChild(balanceInfo);
+                }
+                
+                if (balanceEth > 0) {
+                    balanceInfo.innerHTML = `🎉 <span style="color: #dc3545;">FOUND FUNDS: ${balanceEth.toFixed(6)} ETH!</span>`;
+                    balanceInfo.style.background = '#d4edda';
+                    balanceInfo.style.border = '1px solid #c3e6cb';
+                    balanceInfo.style.color = '#155724';
+                } else {
+                    balanceInfo.innerHTML = `ℹ️ No ETH balance found`;
+                    balanceInfo.style.background = '#f8f9fa';
+                    balanceInfo.style.border = '1px solid #dee2e6';
+                    balanceInfo.style.color = '#6c757d';
+                }
+                
+            } catch (error) {
+                console.error('Error checking balance:', error);
+                button.innerHTML = '❌ Error';
+                button.style.background = '#dc3545';
+            } finally {
+                setTimeout(() => {
+                    button.disabled = false;
+                }, 2000);
+            }
+        }
+    </script>
+  <div>
+    <p>
+  Donations: 0x01A4A92fa43Eca809d1cf85bf1282C9e7585d881
+    </p>
+    </div>
+</body>
+</html>
